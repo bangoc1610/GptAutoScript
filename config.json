@@ -1,0 +1,11 @@
+{
+  "prompt_dir": "G:/5.Tool/PY/1.Gptauto/PROMPT",
+  "output_dir": "G:/1.Youtube/YTB1/Out",
+  "merge_dir": "G:/1.Youtube/YTB1/Script",
+  "bot_url": "https://chatgpt.com/g/g-6890c1f20ccc819184debf18401e6f19-gpt-family-u60",
+  "profile_name": "default",
+  "run_hidden": false,
+  "hide_offscreen": false,
+  "merge_ranges": "4-12",
+  "delay_seconds": "6"
+}
