@@ -632,6 +632,81 @@ class ChatGPTAutomation:
         pre = pr[: min(240, len(pr))]
         return bool(pre and msg.startswith(pre))
 
+    def _read_assistant_after_last_user_prompt(self, prompt: str) -> tuple[bool, str]:
+        """
+        Read assistant text after the latest user bubble matching this prompt.
+        Returns (found_user_prompt, assistant_text).
+        """
+        prompt_norm = ChatGPTAutomation._normalize_message_for_compare(prompt)
+        try:
+            result = self.driver.execute_script(
+                r"""
+                const prompt = (arguments[0] || '').replace(/\s+/g, ' ').trim();
+                function roleOf(el) {
+                  return el.getAttribute && el.getAttribute('data-message-author-role');
+                }
+                function isNestedSameRole(el, role) {
+                  let p = el.parentElement;
+                  while (p) {
+                    if (roleOf(p) === role) return true;
+                    p = p.parentElement;
+                  }
+                  return false;
+                }
+                function textOf(el) {
+                  const inner = el.querySelector(
+                    '[data-message-content],[data-testid="markdown"],div[class*="markdown"],.prose,[class*="prose"],pre'
+                  );
+                  const target = inner || el;
+                  return (target.textContent || target.innerText || '').trim();
+                }
+                function norm(s) {
+                  return (s || '').replace(/\s+/g, ' ').trim();
+                }
+                function matchesPrompt(message, prompt) {
+                  const msg = norm(message);
+                  const pr = norm(prompt);
+                  if (!pr) return !!msg;
+                  if (msg === pr || msg.indexOf(pr) >= 0) return true;
+                  const pre = pr.slice(0, Math.min(240, pr.length));
+                  return !!pre && msg.indexOf(pre) === 0;
+                }
+
+                const all = document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]');
+                const nodes = [];
+                for (const el of all) {
+                  const role = roleOf(el);
+                  if (!role || isNestedSameRole(el, role)) continue;
+                  nodes.push(el);
+                }
+
+                let userIndex = -1;
+                for (let i = nodes.length - 1; i >= 0; i--) {
+                  if (roleOf(nodes[i]) === 'user' && matchesPrompt(textOf(nodes[i]), prompt)) {
+                    userIndex = i;
+                    break;
+                  }
+                }
+                if (userIndex < 0) return { found: false, text: '' };
+
+                const parts = [];
+                for (let i = userIndex + 1; i < nodes.length; i++) {
+                  const role = roleOf(nodes[i]);
+                  if (role === 'user') break;
+                  if (role !== 'assistant') continue;
+                  const t = textOf(nodes[i]);
+                  if (t) parts.push(t);
+                }
+                return { found: true, text: parts.join('\n\n') };
+                """,
+                prompt_norm,
+            )
+            if isinstance(result, dict):
+                return bool(result.get("found")), (result.get("text") or "").strip()
+        except Exception:
+            pass
+        return False, ""
+
     def _composer_inner_content_js(self, el) -> str:
         """Đọc nội dung ô soạn — textarea dùng value; contenteditable dùng innerText."""
         if el is None:
@@ -1094,6 +1169,7 @@ if (el.tagName && el.tagName.toLowerCase() === 'textarea') {
         ba: int,
         bb: int = -1,
         context: str = "",
+        prompt_text: str = "",
         rounds: int = 3,
         interval: float = 0.3,
         timeout: float = 30.0,
@@ -1127,11 +1203,17 @@ if (el.tagName && el.tagName.toLowerCase() === 'textarea') {
         while time.monotonic() < deadline:
             self._call_pause_gate()
 
+            found_prompt_user = False
+            current = ""
+            if prompt_text:
+                found_prompt_user, current = self._read_assistant_after_last_user_prompt(prompt_text)
+
             # Path 1: ID/count-based with virtualization fallback.
-            current = self._read_new_response_textcontent(prev_id, ba, -1 if no_count_growth else bb)
+            if not current and not found_prompt_user:
+                current = self._read_new_response_textcontent(prev_id, ba, -1 if no_count_growth else bb)
 
             # Path 2: use the count saved inside send_prompt_to_chatgpt (avoids ba_now drift).
-            if not current and not no_count_growth:
+            if not current and not found_prompt_user and not no_count_growth:
                 parts = self._assistant_texts_since_js(_since)
                 if not parts:
                     # Path 3: virtualization removed old bubbles — read last n_new from full list.
@@ -1147,7 +1229,7 @@ if (el.tagName && el.tagName.toLowerCase() === 'textarea') {
             if current == last:
                 stable += 1
                 if stable >= rounds:
-                    self._log(f"[stable] OK ({rounds}×, {len(current)} chars) for {ctx}")
+                    self._log(f"[stable] OK (stable {rounds} rounds, {len(current)} chars) for {ctx}")
                     return current
             else:
                 last = current
@@ -1736,28 +1818,21 @@ if (el.tagName && el.tagName.toLowerCase() === 'textarea') {
                         composer.send_keys(prompt)
                     except Exception:
                         pass
-                # Submit using multiple strategies; fresh sessions can be flaky.
+                # Submit once first; only try another method after a short no-signal window.
                 submitted = False
                 try:
-                    self._try_submit_composer_keyboard(composer)
-                    submitted = True
+                    submitted = bool(self._click_send())
                 except Exception:
                     submitted = False
-                if not self._is_generating():
+                if not submitted:
                     try:
-                        if self._click_send():
-                            submitted = True
-                    except Exception:
-                        pass
-                # Last-resort: try to fire Enter via ActionChains.
-                if not submitted and composer is not None:
-                    try:
-                        ActionChains(self.driver).move_to_element(composer).click(composer).send_keys(Keys.ENTER).perform()
+                        self._try_submit_composer_keyboard(composer)
                         submitted = True
                     except Exception:
-                        pass
+                        submitted = False
 
                 deadline = time.monotonic() + 70.0
+                next_fallback_submit = time.monotonic() + 1.5
                 sent_ok = False
                 while time.monotonic() < deadline:
                     self._call_pause_gate()
@@ -1769,6 +1844,19 @@ if (el.tagName && el.tagName.toLowerCase() === 'textarea') {
                             break
                     except Exception:
                         pass
+                    if time.monotonic() >= next_fallback_submit:
+                        next_fallback_submit = time.monotonic() + 9999.0
+                        try:
+                            if self._click_send():
+                                submitted = True
+                        except Exception:
+                            pass
+                        if not submitted and composer is not None:
+                            try:
+                                ActionChains(self.driver).move_to_element(composer).click(composer).send_keys(Keys.ENTER).perform()
+                                submitted = True
+                            except Exception:
+                                pass
                     time.sleep(0.12)
                 if not sent_ok:
                     raise TimeoutException("sent_signal not satisfied")
@@ -1776,23 +1864,8 @@ if (el.tagName && el.tagName.toLowerCase() === 'textarea') {
                 break
             except TimeoutException as e:
                 last_exc = e
-                self._log(
-                    f"[send] Lần {attempt}/3: chưa thấy tín hiệu đã gửi ({e.__class__.__name__}), thử lại..."
-                )
-                try:
-                    self._best_effort_prepare_chat()
-                    composer = self._find_composer()
-                    self._prime_composer_focus(composer)
-                    try:
-                        composer.send_keys(Keys.CONTROL, "a")
-                        composer.send_keys(Keys.BACKSPACE)
-                    except Exception:
-                        pass
-                    self._set_composer_text_js(composer, prompt)
-                    if not self._click_send():
-                        self._try_submit_composer_keyboard(composer)
-                except Exception as e2:
-                    self._log(f"[send] Chuẩn bị retry thất bại: {e2!r}")
+                self._log(f"[send] Attempt {attempt}/3 timed out; retrying without extra pre-send.")
+                continue
 
         if last_exc is not None:
             raise last_exc

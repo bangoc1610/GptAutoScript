@@ -862,16 +862,33 @@ class App(tk.Tk):
                                 resp = autom.extract_new_response_stable(
                                     prev_id, ba_now, bb=bb_now,
                                     context=f"{txt_name} prompt {idx}/{len(prompts)}",
+                                    prompt_text=p,
                                     timeout=max(5.0, delay_seconds)
                                 )
+                                prompt_user_seen = False
+                                if not resp:
+                                    try:
+                                        prompt_user_seen, prompt_bound_resp = autom._read_assistant_after_last_user_prompt(p)
+                                        if prompt_bound_resp:
+                                            resp = prompt_bound_resp.strip()
+                                    except Exception:
+                                        prompt_user_seen = False
                                 # 2. Multi-method range fallback.
-                                if not resp and bb_now > ba_now:
+                                if not resp and prompt_user_seen:
+                                    self.log_queue.put(
+                                        f"[worker] [{txt_name}] Prompt {idx} chưa có assistant sau đúng prompt — bỏ fallback để tránh copy nhầm phản hồi cũ."
+                                    )
+                                elif not resp and bb_now > ba_now:
                                     resp = (autom.collect_assistant_range_filled(
                                         ba_now, bb_now,
                                         context=f"{txt_name} prompt {idx}/{len(prompts)}"
                                     ) or "").strip()
                                 # 3. Multi-method fallback cuối cùng.
-                                if (not resp or resp == ChatGPTAutomation._EXPORT_EMPTY_PLACEHOLDER) and bb_now > ba_now:
+                                if (
+                                    not prompt_user_seen
+                                    and (not resp or resp == ChatGPTAutomation._EXPORT_EMPTY_PLACEHOLDER)
+                                    and bb_now > ba_now
+                                ):
                                     resp = (autom.copy_assistant_bubble_by_index(bb_now - 1) or "").strip()
 
                                 is_empty = (not resp) or resp == ChatGPTAutomation._EXPORT_EMPTY_PLACEHOLDER
