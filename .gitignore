@@ -1,10 +1,17 @@
-__pycache__/ 
-*.pyc 
-.env 
-logs/ 
-OUT/ 
-MERGE/ 
-profiles/ 
-remote-profile/ 
-!profiles/.gitkeep 
-!remote-profile/.gitkeep 
+__pycache__/
+*.pyc
+.env
+
+profiles/
+
+remote-profile/**/Cache/
+remote-profile/**/Code Cache/
+remote-profile/**/GPUCache/
+remote-profile/**/Service Worker/
+remote-profile/**/Session Storage/
+remote-profile/**/Network/
+remote-profile/**/Local Storage/
+
+remote-profile/**/Cookies
+remote-profile/**/Cookies-journal
+remote-profile/**/*.log
